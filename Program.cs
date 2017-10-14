@@ -6,6 +6,10 @@ using System.Web;
 using System.Linq;
 using System.Collections.Generic;
 using System.Collections.Concurrent;
+using System.Collections;
+using System.Reactive.Linq;
+using System.Reactive.Concurrency;
+using Newtonsoft.Json;
 
 /*
 
@@ -16,7 +20,17 @@ using System.Collections.Concurrent;
  */
 namespace DofusKeyFinder
 {
-    public class Frequency
+    public class Map
+    {
+        public int Id;
+        public int Width;
+        public int Height;
+        public String Key;
+        public String DecodedData;
+        public String EncodedData;
+    }
+
+    public class Frequencies
     {
         public Dictionary<char, float> Global;
         public Dictionary<char, float>[] Position;
@@ -24,25 +38,46 @@ namespace DofusKeyFinder
 
 
     /*
-        Achieved 75% success
+        Achieved 75% success xd
      */
     class Program
     {
         const int MinKeyLength = 128;
-        const int MaxKeyLength = 300;
+        const int MaxKeyLength = 256;
+        const int MinKeyXor = 32;
+        const int MaxKeyXor = 127;
+        public static String HEX_CHARS = "0123456789ABCDEF";
+        public static String MapsPath = "../maps";
+        public static String FrequenciesPath = "./frequencies.json";
+
+        public static Frequencies LoadFrequency()
+        {
+            return JsonConvert.DeserializeAnonymousType<Frequencies>(File.ReadAllText(FrequenciesPath), new Frequencies());
+        }
+
+        public static IEnumerable<Map> LoadMaps()
+        {
+            return Directory.GetFiles(MapsPath, "*.json")
+                .Select(file => JsonConvert.DeserializeAnonymousType<Map>(File.ReadAllText(file), new Map()));
+        }
 
         public static void Main(String[] args)
         {
             var frequency = LoadFrequency();
-            /*
-            
-                var guessedKey = ComputeKey(frequency, HexToString(map.EncodedData));
-            
-             */
+            var maps = LoadMaps();
+            foreach (var map in maps)
+            {
+                var data = HexToString(map.EncodedData);
+                var keyLengthHamming = ComputeKeyLengthHamming(data);
+                var guessedKey = GuessKey(data, keyLengthHamming, frequency);
+
+                /*
+                    Get fun
+                 */
+            }
         }
 
-        public static string HEX_CHARS = "0123456789ABCDEF";
-        public static string Checksum(String key)
+        public static String Checksum(String key)
         {
             int checksum = 0;
             for (int i = 0; i < key.Length; i++)
@@ -53,35 +88,35 @@ namespace DofusKeyFinder
         }
         public static String Decrypt(String data, String key)
         {
+            data = HexToString(data);
             int shift = int.Parse(Checksum(key), NumberStyles.HexNumber) * 2;
             var decrypted = new StringBuilder(data.Length);
             int keyLength = key.Length;
-            var k = 0;
-            for (int i = 0; i < data.Length; i += 2)
+            for (var i = 0; i < data.Length; i++)
             {
-                var currentData = int.Parse(data.Substring(i, 2), NumberStyles.HexNumber);
-                var currentKey = char.ConvertToUtf32(key, (k++ + shift) % keyLength);
-                decrypted.Append(char.ConvertFromUtf32(currentData ^ currentKey));
+                var currentData = data[i];
+                var currentKey = key[(i + shift) % keyLength];
+                decrypted.Append((char)(currentData ^ currentKey));
             }
-            return Uri.UnescapeDataString(decrypted.ToString());
+            return HttpUtility.UrlDecode(decrypted.ToString());
         }
 
-        public static string HexToString(string data)
+        public static String HexToString(String data)
         {
             var output = new StringBuilder(data.Length / 2);
             for (var i = 0; i < data.Length; i += 2)
             {
-                output.Append(char.ConvertFromUtf32(int.Parse(data.Substring(i, 2), NumberStyles.HexNumber)));
+                output.Append((char)int.Parse(data.Substring(i, 2), NumberStyles.HexNumber));
             }
             return output.ToString();
         }
 
-        public static string PrepareKey(string data)
+        public static String PrepareKey(String data)
         {
-            return Uri.UnescapeDataString(HexToString(data));
+            return HttpUtility.UrlDecode(HexToString(data));
         }
 
-        public static HashSet<int> ComputeMaxShifts(string s)
+        public static HashSet<int> ComputeMaxShifts(String s)
         {
             var shifts = new HashSet<int>();
             int matchPos = 0, maxLength = 0;
@@ -106,13 +141,13 @@ namespace DofusKeyFinder
             return shifts;
         }
 
-        public static string LeftRotateShift(string key, int shift)
+        public static String LeftRotateShift(String key, int shift)
         {
             shift %= key.Length;
             return key.Substring(shift) + key.Substring(0, shift);
         }
 
-        public static string RightRotateShift(string key, int shift)
+        public static String RightRotateShift(String key, int shift)
         {
             shift %= key.Length;
             return key.Substring(key.Length - shift) + key.Substring(0, key.Length - shift);
@@ -123,45 +158,83 @@ namespace DofusKeyFinder
             return (a == 0 || b == 0) ? a | b : GCD(Math.Min(a, b), Math.Max(a, b) % Math.Min(a, b));
         }
 
-        public static Frequency LoadFrequency()
+        public static int ComputeKeyLengthKasysky(String encodedData)
         {
-            return Newtonsoft.Json.JsonConvert.DeserializeAnonymousType<Frequency>(File.ReadAllText("./frequencies.json"), new Frequency());
+            return ComputeMaxShifts(encodedData)
+                .Where(shift => shift >= MinKeyLength)
+                .Aggregate(GCD);
         }
 
-        public static string ComputeKey(Frequency frequency, string encodedData)
+        public static int ComputeHammingDistance(String message, int x, int y, int keyLength)
         {
-            var shifts = ComputeMaxShifts(encodedData)
-                .Where(shift => shift > MinKeyLength)
-                .ToList();
-            var computedKeyLength = shifts.Aggregate(GCD);
-            if (computedKeyLength < MinKeyLength || computedKeyLength > MaxKeyLength)
-                throw new InvalidOperationException("invalid key length computed");
-            return GuessKey(encodedData, computedKeyLength, frequency);
-        }
-
-        private static string GuessKey(string data, int keyLength, Frequency frequency)
-        {
-            var blocks = new List<string>();
-            for (var i = 0; i < data.Length - keyLength; i += keyLength)
-            {
-                blocks.Add(data.Substring(i, keyLength));
-            }
-            var key = new StringBuilder();
+            var distance = 0;
             for (var i = 0; i < keyLength; i++)
             {
-                var cryptedBlock = new string(blocks.Select(block => block[i]).ToArray());
-                var bestError = float.MaxValue;
-                var bestXor = 0;
-                for (var j = 0; j < 255; j++)
+                var cA = message[x + i];
+                var cB = message[y + i];
+                var xor = cA ^ cB;
+                while (xor != 0)
                 {
-                    var decryptedBlock = new StringBuilder(cryptedBlock.Length);
-                    for (var k = 0; k < cryptedBlock.Length; k++)
+                    distance++;
+                    xor &= xor - 1;
+                }
+            }
+            return distance;
+        }
+
+        /*
+
+            100% Accurate
+
+         */
+        public static int ComputeKeyLengthHamming(String encodedData)
+        {
+            var bestKeyLength = 0;
+            var bestScore = int.MaxValue;
+            for (var keyLength = MinKeyLength; keyLength <= MaxKeyLength; keyLength++)
+            {
+                var numberOfBlock = encodedData.Length / keyLength;
+                var currentScore = 0;
+                for (var j = 0; j < numberOfBlock - 1; j++)
+                {
+                    for (var k = j + 1; k < numberOfBlock; k++)
                     {
-                        decryptedBlock.Append(char.ConvertFromUtf32(cryptedBlock[k] ^ j));
+                        var x = j * keyLength;
+                        var y = k * keyLength;
+                        currentScore += ComputeHammingDistance(encodedData, x, y, keyLength);
                     }
-                    var decrypted = Uri.UnescapeDataString(decryptedBlock.ToString());
-                    var error = ComputeError(decrypted, i, frequency);
-                    if (error <= bestError)
+                }
+                currentScore = currentScore / numberOfBlock;
+                if (currentScore < bestScore)
+                {
+                    bestKeyLength = keyLength;
+                    bestScore = currentScore;
+                }
+            }
+            return bestKeyLength;
+        }
+
+        private static String GuessKey(String message, int keyLength, Frequencies frequency)
+        {
+            var numberOfBlock = message.Length / keyLength;
+            var key = new StringBuilder();
+            for (var indexInBlock = 0; indexInBlock < keyLength; indexInBlock++)
+            {
+                var bestError = double.MaxValue;
+                var bestXor = 0;
+                // Only between thoses
+                for (var j = MinKeyXor; j <= MaxKeyXor; j++)
+                {
+                    var decryptedBlock = new char[numberOfBlock];
+                    for (var k = 0; k < numberOfBlock; k++)
+                    {
+                        var currentData = message[k * keyLength + indexInBlock];
+                        var currentKey = j;
+                        decryptedBlock[k] = (char)(currentData ^ currentKey);
+                    }
+                    var decrypted = HttpUtility.UrlDecode(new String(decryptedBlock));
+                    var error = ComputeError(decrypted, indexInBlock, frequency);
+                    if (error < bestError)
                     {
                         bestError = error;
                         bestXor = j;
@@ -169,54 +242,53 @@ namespace DofusKeyFinder
                 }
                 key.Append((char)bestXor);
             }
-            var stringKey = key.ToString();
-            int shift = int.Parse(Checksum(stringKey), NumberStyles.HexNumber) * 2;
-            return RightRotateShift(stringKey, shift);
+            // Shift back the key with its checksum
+            var StringKey = key.ToString();
+            int shift = int.Parse(Checksum(StringKey), NumberStyles.HexNumber) * 2;
+            return RightRotateShift(StringKey, shift);
         }
-        private static float ComputeError(string decrypted, int position, Frequency frequency)
-        {
-            var currentFrequencies = new Dictionary<char, int>();
-            PopulateFrequency(decrypted, currentFrequencies);
 
-            var globalError = 0f;
-            foreach (var kv in currentFrequencies)
+        private static double ComputeError(String decrypted, int indexInBlock, Frequencies frequency)
+        {
+            var currentFrequencies = GetFrequencies(decrypted);
+            /*
+                I don't know how to use that position frequency, seems to be 
+                hard, even if the blocks are essentially based on the same
+                characters
+             */
+            var positionFrequencies = frequency.Position[indexInBlock % 10];
+            return GetFrequencyDistance(currentFrequencies, frequency.Global);
+        }
+
+        // Squared Euclidean distance
+        public static double GetFrequencyDistance(Dictionary<char, float> u, Dictionary<char, float> v)
+        {
+            var distance = 0.0;
+            foreach (var kv in u)
             {
-                if (!frequency.Global.ContainsKey(kv.Key))
+                if (v.ContainsKey(kv.Key))
                 {
-                    globalError += 10;
+                    distance += Math.Abs(kv.Value - v[kv.Key]);
                 }
                 else
                 {
-                    var globalFreq = frequency.Global[kv.Key];
-                    var currentFreq = kv.Value / (float)decrypted.Length;
-                    globalError += Math.Abs(currentFreq - globalFreq);
+                    distance += 100;
                 }
             }
-
-            float positionBonus = 0;
-            for (var i = 0; i < decrypted.Length; i++)
-            {
-                var key = decrypted[i];
-                var positionFrequenciesI = frequency.Position[position % 10];
-                if (positionFrequenciesI.ContainsKey(key))
-                {
-                    // we shoud be doing something 
-                    // positionBonus -= (float)Math.Pow(positionFrequenciesI[key], 10);
-                    positionBonus += positionFrequenciesI[key];
-                }
-            }
-            return globalError; //+ (1 - (positionBonus / decrypted.Length));
+            return distance;
         }
 
-        private static void PopulateFrequency(string input, IDictionary<char, int> count)
+        private static Dictionary<char, float> GetFrequencies(String input)
         {
+            var frequencies = new Dictionary<char, int>();
             foreach (var c in input)
             {
-                if (count.ContainsKey(c))
-                    count[c]++;
+                if (frequencies.ContainsKey(c))
+                    frequencies[c]++;
                 else
-                    count[c] = 1;
+                    frequencies[c] = 1;
             }
+            return frequencies.ToDictionary(kv => kv.Key, kv => (float)(kv.Value / (float)input.Length));
         }
     }
 }
