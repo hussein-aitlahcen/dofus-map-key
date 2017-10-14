@@ -7,6 +7,13 @@ using System.Linq;
 using System.Collections.Generic;
 using System.Collections.Concurrent;
 
+/*
+
+    Smarken 2017
+
+    Thanks to Manghao for making me mad
+
+ */
 namespace DofusKeyFinder
 {
     public class Frequency
