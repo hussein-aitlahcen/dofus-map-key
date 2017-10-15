@@ -6,4 +6,6 @@
 bin
 obj
 debug
+input/*
+output/*
 __old_school__

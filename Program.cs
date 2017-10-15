@@ -47,34 +47,31 @@ namespace DofusKeyFinder
         const int MinKeyXor = 32;
         const int MaxKeyXor = 127;
         public static String HEX_CHARS = "0123456789ABCDEF";
-        public static String MapsPath = "../maps";
         public static String FrequenciesPath = "./frequencies.json";
+        public static string InputPath = "./input";
+        public static string OutputPath = "./output";
 
         public static Frequencies LoadFrequency()
         {
             return JsonConvert.DeserializeAnonymousType<Frequencies>(File.ReadAllText(FrequenciesPath), new Frequencies());
         }
-
-        public static IEnumerable<Map> LoadMaps()
-        {
-            return Directory.GetFiles(MapsPath, "*.json")
-                .Select(file => JsonConvert.DeserializeAnonymousType<Map>(File.ReadAllText(file), new Map()));
-        }
-
         public static void Main(String[] args)
         {
             var frequency = LoadFrequency();
-            var maps = LoadMaps();
-            foreach (var map in maps)
-            {
-                var data = HexToString(map.EncodedData);
-                var keyLengthHamming = ComputeKeyLengthHamming(data);
-                var guessedKey = GuessKey(data, keyLengthHamming, frequency);
-
-                /*
-                    Get fun
-                 */
-            }
+            Directory.CreateDirectory(InputPath);
+            Directory.CreateDirectory(OutputPath);
+            Directory.GetFiles(InputPath, "*")
+                .ToObservable()
+                .Select(path => new { EncodedData = HexToString(File.ReadAllText(path)), Name = Path.GetFileName(path) })
+                .Do(x => Console.WriteLine("processing: " + x.Name))
+                .Select(x => new { Header = x, KeyLength = ComputeKeyLengthHamming(x.EncodedData) })
+                .Select(y => new { Data = y, Key = FormatKeyExport(GuessKey(y.Header.EncodedData, y.KeyLength, frequency)) })
+                .Do(z => File.WriteAllText(string.Format("{0}/{1}", OutputPath, z.Data.Header.Name + "_key.txt"), z.Key))
+                .ObserveOn(TaskPoolScheduler.Default)
+                .Subscribe(z =>
+                {
+                    Console.WriteLine("done.");
+                });
         }
 
         public static String Checksum(String key)
@@ -88,7 +85,6 @@ namespace DofusKeyFinder
         }
         public static String Decrypt(String data, String key)
         {
-            data = HexToString(data);
             int shift = int.Parse(Checksum(key), NumberStyles.HexNumber) * 2;
             var decrypted = new StringBuilder(data.Length);
             int keyLength = key.Length;
@@ -114,6 +110,28 @@ namespace DofusKeyFinder
         public static String PrepareKey(String data)
         {
             return HttpUtility.UrlDecode(HexToString(data));
+        }
+
+        public static String PreEscape(String input)
+        {
+            var output = new StringBuilder();
+            foreach (var c in input)
+            {
+                if (c < 32 || c > 127 || c == '%' || c == '+')
+                {
+                    output.Append(HttpUtility.UrlEncode(char.ToString(c)));
+                }
+                else
+                {
+                    output.Append(c);
+                }
+            }
+            return output.ToString();
+        }
+
+        public static String FormatKeyExport(string key)
+        {
+            return PreEscape(key).Select(c => String.Format("{0:X}", (int)c)).Aggregate("", (acc, c) => acc + c);
         }
 
         public static HashSet<int> ComputeMaxShifts(String s)
@@ -234,7 +252,7 @@ namespace DofusKeyFinder
                     }
                     var decrypted = HttpUtility.UrlDecode(new String(decryptedBlock));
                     var error = ComputeError(decrypted, indexInBlock, frequency);
-                    if (error < bestError)
+                    if (error <= bestError)
                     {
                         bestError = error;
                         bestXor = j;
@@ -272,7 +290,7 @@ namespace DofusKeyFinder
                 }
                 else
                 {
-                    distance += 100;
+                    distance += 10;
                 }
             }
             return distance;
