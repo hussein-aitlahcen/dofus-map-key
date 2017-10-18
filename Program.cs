@@ -32,7 +32,7 @@ namespace DofusKeyFinder
 
     public class Statistics
     {
-        public double ProbabilityOfPair;
+        public double IndexOfCoincidence;
         public Dictionary<char, double> GlobalFrequencies;
         public Dictionary<char, double>[] PositionFrequencies;
     }
@@ -44,7 +44,7 @@ namespace DofusKeyFinder
     }
 
     /*
-        Achieved 75% success xd
+        Achieved 90% success on finding a key
      */
     class Program
     {
@@ -91,8 +91,7 @@ namespace DofusKeyFinder
             var statistics = new Statistics()
             {
                 GlobalFrequencies = new Dictionary<char, double>(),
-                PositionFrequencies = new Dictionary<char, double>[CellPatternSize],
-                ProbabilityOfPair = 0.0
+                PositionFrequencies = new Dictionary<char, double>[CellPatternSize]
             };
             for (var i = 0; i < CellPatternSize; i++)
             {
@@ -107,7 +106,7 @@ namespace DofusKeyFinder
             var totalCoincidence = 0.0;
             foreach (var map in maps)
             {
-                totalCoincidence += ComputeCoincidenceRate(map.EncodedData);
+                totalCoincidence += ComputeCoincidenceRate(map.DecodedData);
                 totalDecodedLength += map.DecodedData.Length;
                 for (var i = 0; i < map.DecodedData.Length; i++)
                 {
@@ -133,7 +132,7 @@ namespace DofusKeyFinder
                 }
             }
 
-            var averageCoincidence = totalCoincidence / maps.Count();
+            statistics.IndexOfCoincidence = totalCoincidence / maps.Count();
 
             // Normalize
             foreach (var k in statistics.GlobalFrequencies.Keys.ToList())
@@ -148,34 +147,6 @@ namespace DofusKeyFinder
                     positionFrequencies[k] /= totalDecodedLength / CellPatternSize;
                 }
             }
-
-            // Probabilities
-            var random = new Random();
-            var hit = 0;
-            const int MaxTry = 100000;
-            for (var i = 0; i < MaxTry; i++)
-            {
-                var a = random.NextDouble();
-                var b = random.NextDouble();
-                foreach (var kv in statistics.GlobalFrequencies.OrderByDescending(kv => kv.Value))
-                {
-                    if (a >= kv.Value && b >= kv.Value)
-                    {
-                        hit++;
-                        break;
-                    }
-                    else if (a < kv.Value && b >= kv.Value)
-                    {
-                        break;
-                    }
-                    else if (a >= kv.Value && b < kv.Value)
-                    {
-                        break;
-                    }
-                }
-            }
-
-            statistics.ProbabilityOfPair = hit / (double)MaxTry;
 
             SaveStatistics(statistics);
 
@@ -195,13 +166,17 @@ namespace DofusKeyFinder
                 tih++;
                 var realKey = PrepareKey(map.Key);
                 var encodedData = HexToString(map.EncodedData);
-                //var keyLength = ComputeKeyLengthHamming(encodedData);
+                var keyLengthHamming = ComputeKeyLengthHamming(encodedData);
 
                 // FAR BETTER
-                var keyLengthFriedman = ComputeKeyLengthFriedman(encodedData);
-
+                var keyLengthFriedman = ComputeKeyLengthFriedman(statistics, encodedData);
                 //var keyLengthKasiski = ComputeKeyLengthKasiski(encodedData);
                 //var keyLengthFreq = ComputeKeyLengthFrequency(encodedData);
+
+                if (keyLengthFriedman != realKey.Length)
+                {
+                    Console.WriteLine($"r={realKey.Length}, f={keyLengthFriedman}, h={keyLengthHamming}");
+                }
                 var key = GuessKey(encodedData, keyLengthFriedman, statistics);
                 if (key.Value == realKey)
                 {
@@ -235,7 +210,7 @@ namespace DofusKeyFinder
                 .ToObservable()
                 .Select(path => new { EncodedData = HexToString(File.ReadAllText(path)), Name = Path.GetFileName(path) })
                 .Do(x => Console.WriteLine("processing: " + x.Name))
-                .Select(x => new { Header = x, KeyLength = ComputeKeyLengthFriedman(x.EncodedData) })
+                .Select(x => new { Header = x, KeyLength = ComputeKeyLengthFriedman(statistics, x.EncodedData) })
                 .Select(y => new { Data = y, Key = GuessKey(y.Header.EncodedData, y.KeyLength, statistics) })
                 .Do(z => Console.WriteLine($"alternatives: {z.Key.Alternatives.Count}"))
                 .Do(z => File.WriteAllText(string.Format("{0}/{1}", OutputPath, z.Data.Header.Name + "_key.txt"), FormatKeyExport(z.Key.Value)))
@@ -302,15 +277,12 @@ namespace DofusKeyFinder
             return output.ToString();
         }
 
-        public static string FormatKeyExport(string key)
-        {
-            return PreEscape(key).Select(c => String.Format("{0:X}", (int)c)).Aggregate("", (acc, c) => acc + c);
-        }
 
         public static HashSet<int> ComputeMaxShifts(string s)
         {
             var shifts = new HashSet<int>();
-            int matchPos = 0, minLength = 3;
+            var matchPos = 0;
+            var minLength = 3;
             for (int shift = 1; shift < s.Length; shift++)
             {
                 int matchCount = 0;
@@ -319,7 +291,7 @@ namespace DofusKeyFinder
                     if (s[i] == s[i + shift])
                     {
                         matchCount++;
-                        if (matchCount > minLength)
+                        if (matchCount >= minLength)
                         {
                             matchPos = i - matchCount + 1;
                             shifts.Add(shift);
@@ -364,16 +336,6 @@ namespace DofusKeyFinder
                 .Aggregate(GCD);
         }
 
-        public static double ComputeCoincidenceAverage(Statistics statistics)
-        {
-            var normalDistributionProbability = 1 / (double)statistics.GlobalFrequencies.Count;
-            return statistics
-                .GlobalFrequencies
-                .Values
-                .Select(value => value * statistics.GlobalFrequencies.Count)
-                .Aggregate(0.0, (acc, freq) => acc + (freq * freq) / normalDistributionProbability);
-        }
-
         public static double ComputeCoincidenceRate(string encodedData)
         {
             return ComputeCoincidenceRate(encodedData, 0, encodedData.Length);
@@ -381,17 +343,15 @@ namespace DofusKeyFinder
 
         public static double ComputeCoincidenceRate(string encodedData, int offset, int count)
         {
-            var frequencies = GetFrequencies(encodedData, offset, count);
-            return ComputeCoincidenceRate(frequencies, count);
+            return ComputeCoincidenceRate(GetFrequencies(encodedData, offset, count), count);
         }
 
         public static double ComputeCoincidenceRate(Dictionary<char, double> frequencies, int length)
         {
-            var normalizedFrequencies = frequencies
-                .ToDictionary(kv => kv.Key, kv => kv.Value * length);
-            return normalizedFrequencies
+            return frequencies
                 .Values
-                .Aggregate(0.0, (acc, freq) => acc + (freq * (freq - 1)) / (length * (length - 1)));
+                .Select(value => value * length)
+                .Aggregate(0.0, (acc, freq) => acc + ((freq * (freq - 1)) / (length * (length - 1))));
         }
 
         public static int ComputeKeyLengthFrequency(string encodedData)
@@ -423,20 +383,27 @@ namespace DofusKeyFinder
             return bestKeyLength;
         }
 
-        public static int ComputeKeyLengthFriedman(string encodedData)
+        public static int ComputeKeyLengthFriedman(Statistics statistics, string encodedData)
         {
             var bestCoincidence = double.MinValue;
             var bestKeyLength = -1;
             for (var keyLength = MinKeyLength; keyLength <= MaxKeyLength; keyLength++)
             {
                 var totalCoincidence = 0.0;
-                var numberOfBlock = encodedData.Length / keyLength;
-                var cryptedBlock = new char[numberOfBlock];
-                for (var i = 0; i < keyLength; i++)
+                var numberOfBlock = (int)Math.Ceiling(encodedData.Length / (double)keyLength);
+                var offsetOverflow = encodedData.Length % keyLength;
+                for (var blockOffset = 0; blockOffset < keyLength; blockOffset++)
                 {
+                    var numberOfBlockAffected = offsetOverflow > 0 ?
+                          blockOffset > offsetOverflow ? numberOfBlock - 1 : numberOfBlock : numberOfBlock;
+                    var cryptedBlock = new char[numberOfBlockAffected];
                     for (var blockNumber = 0; blockNumber < numberOfBlock; blockNumber++)
                     {
-                        cryptedBlock[blockNumber] = encodedData[blockNumber * keyLength + i];
+                        var absoluteOffset = blockNumber * keyLength + blockOffset;
+                        if (absoluteOffset < encodedData.Length)
+                        {
+                            cryptedBlock[blockNumber] = encodedData[absoluteOffset];
+                        }
                     }
                     totalCoincidence += ComputeCoincidenceRate(new string(cryptedBlock));
                 }
@@ -498,7 +465,8 @@ namespace DofusKeyFinder
         {
             var alternatives = new Dictionary<int, List<(int, double)>>();
             var blockSize = keyLength;
-            var numberOfBlock = message.Length / blockSize;
+            var numberOfBlock = (int)Math.Ceiling(message.Length / (double)blockSize);
+            var offsetOverflow = message.Length % blockSize;
             var key = new StringBuilder();
             for (var blockOffset = 0; blockOffset < blockSize; blockOffset++)
             {
@@ -508,11 +476,17 @@ namespace DofusKeyFinder
                 // Only between thoses
                 for (var xorKey = MinKeyXor; xorKey <= MaxKeyXor; xorKey++)
                 {
-                    var decryptedBlock = new char[numberOfBlock];
+                    var numberOfBlockAffected = offsetOverflow > 0 ?
+                        blockOffset > offsetOverflow ? numberOfBlock - 1 : numberOfBlock : numberOfBlock;
+                    var decryptedBlock = new char[numberOfBlockAffected];
                     for (var blockNumber = 0; blockNumber < numberOfBlock; blockNumber++)
                     {
-                        var currentData = message[blockNumber * blockSize + blockOffset];
-                        decryptedBlock[blockNumber] = (char)(currentData ^ xorKey);
+                        var absoluteOffset = blockNumber * blockSize + blockOffset;
+                        if (absoluteOffset < message.Length)
+                        {
+                            var currentData = message[absoluteOffset];
+                            decryptedBlock[blockNumber] = (char)(currentData ^ xorKey);
+                        }
                     }
                     var decrypted = HttpUtility.UrlDecode(new string(decryptedBlock));
                     var error = ComputeError(decrypted, blockOffset, blockSize, statistics);
@@ -616,6 +590,11 @@ namespace DofusKeyFinder
                     statistics[c] = 1;
             }
             return statistics.ToDictionary(kv => kv.Key, kv => (kv.Value / count));
+        }
+
+        public static string FormatKeyExport(string key)
+        {
+            return PreEscape(key).Select(c => String.Format("{0:X}", (int)c)).Aggregate("", (acc, c) => acc + c);
         }
     }
 }
